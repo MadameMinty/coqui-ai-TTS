@@ -430,6 +430,13 @@ class NewGenerationMixin(GenerationMixin):
 
             # sample
             probs = nn.functional.softmax(next_token_scores, dim=-1)
+            # Clamp to avoid tiny negative values from float rounding that cause
+            # torch.multinomial to trigger CUDA device-side assert
+            probs = probs.clamp(min=0)
+            # Guard against all-zero rows (e.g. from extreme logit processing)
+            zero_rows = probs.sum(dim=-1) == 0
+            if zero_rows.any():
+                probs[zero_rows] = 1.0 / probs.shape[-1]  # uniform fallback
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # finished sentences should have their next token be a padding token
