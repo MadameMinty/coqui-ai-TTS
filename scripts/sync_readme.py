@@ -16,7 +16,7 @@ def sync_readme():
     ap.add_argument("--check", action="store_true", default=False)
     args = ap.parse_args()
     readme_path = Path(__file__).parent.parent / "README.md"
-    orig_content = readme_path.read_text()
+    orig_content = readme_path.read_text(encoding="utf-8")
     from TTS.bin.synthesize import description
 
     new_content = replace_between_markers(orig_content, "tts-readme", description.strip())
@@ -28,7 +28,7 @@ def sync_readme():
             exit(42)
         print("All good, files in sync")
         exit(0)
-    readme_path.write_text(new_content)
+    readme_path.write_text(new_content, encoding="utf-8", newline="\n")
     print("Updated README.md")
 
 
