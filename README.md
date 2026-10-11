@@ -258,6 +258,36 @@ From version 0.27.0 you can [cache cloned
 voices](https://coqui-tts.readthedocs.io/en/latest/cloning.html) with a custom
 `speaker` ID, so you only need to pass audio files in `speaker_wav` once.
 
+#### Faster XTTS on CUDA
+
+Replay the GPT's decoding steps as a CUDA graph, run it in half precision and
+decode several sentences together:
+
+```python
+tts.synthesizer.tts_model.set_gpt_dtype("bf16")  # or "fp16"; None for float32
+wav = tts.tts(
+  text="A long text. With many sentences.",
+  speaker_wav="my/cloning/audio.wav",
+  language="en",
+  cuda_graph=True,
+  batch_size=8,
+)
+```
+
+Voicing time with XTTS-v2 on an RTX 4080 SUPER (warm model, one cloned voice),
+by audio length:
+
+| Setting | ~81 s of audio | ~34 s of audio |
+|---|---|---|
+| float32, default | 24.2 s | 10.7 s |
+| float32, `cuda_graph`, `batch_size=8` | 4.1 s (5.8×) | 2.7 s (3.9×) |
+| bf16, `cuda_graph`, `batch_size=8` | 2.2 s (11.2×) | 1.3 s (8.2×) |
+| fp16, `cuda_graph`, `batch_size=8` | 2.1 s (11.3×) | 1.3 s (8.1×) |
+
+Speech recognition error rates stay within noise of float32. See the [XTTS
+docs](https://coqui-tts.readthedocs.io/en/latest/models/xtts.html#faster-inference)
+for details.
+
 > [!NOTE]
 > For more control or additional outputs, e.g. timestamps, use the lower-level
 > [Synthesizer API](https://coqui-tts.readthedocs.io/en/latest/main_classes/synthesizer.html).
