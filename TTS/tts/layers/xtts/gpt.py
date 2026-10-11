@@ -510,12 +510,13 @@ class GPT(nn.Module):
         text_inputs,
         *,
         use_owned_decoder: bool = True,
+        cuda_graph: bool = False,
         **hf_generate_kwargs,
     ):
         """Generate audio codes `[B, T]`, padded with the stop token after it.
 
         Uses the owned decode loop unless it can't honor the arguments (beam search, several return sequences, or
-        other `generate()` options); then `transformers` `generate()`.
+        other `generate()` options); then `transformers` `generate()`. `cuda_graph`: see `decoding.decode`.
         """
         kwargs = dict(hf_generate_kwargs)
         sampling = Sampling.from_kwargs(kwargs)
@@ -525,7 +526,8 @@ class GPT(nn.Module):
         kwargs.pop("length_penalty", None)  # beam search only
         if use_owned_decoder and not kwargs:
             prefix = self.prefix_embeddings(cond_latents, text_inputs)
-            return torch.stack([tokens for tokens, _ in decode(self, prefix, sampling=sampling)], dim=1)
+            steps = decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph)
+            return torch.stack([tokens for tokens, _ in steps], dim=1)
 
         gpt_inputs = self.compute_embeddings(cond_latents, text_inputs)
         stop_token_tensor = torch.tensor(self.stop_audio_token, device=gpt_inputs.device, dtype=torch.long)
@@ -543,11 +545,12 @@ class GPT(nn.Module):
             return gen.sequences[:, gpt_inputs.shape[1] :], gen
         return gen[:, gpt_inputs.shape[1] :]
 
-    def get_generator(self, cond_latents, text_inputs, **sampling_kwargs):
+    def get_generator(self, cond_latents, text_inputs, *, cuda_graph: bool = False, **sampling_kwargs):
         """Stream `(token, latent)` pairs per step for a single sequence; see `decoding.decode`."""
         kwargs = dict(sampling_kwargs)
         sampling = Sampling.from_kwargs(kwargs)
         if kwargs:
             msg = f"Unsupported streaming generation arguments: {sorted(kwargs)}"
             raise TypeError(msg)
-        return decode(self, self.prefix_embeddings(cond_latents, text_inputs), sampling=sampling)
+        prefix = self.prefix_embeddings(cond_latents, text_inputs)
+        return decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph)
