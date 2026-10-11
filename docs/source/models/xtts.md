@@ -293,6 +293,10 @@ bf16 and batching. bf16 is as fast as fp16 with more numeric headroom.
 Here the goal is to stream the audio as it is being generated. This is useful for real-time applications.
 Streaming inference is typically slower than regular inference, but it allows to get a first chunk of audio faster.
 
+`inference_stream()` takes the sampling settings (`temperature`, `top_k`, `top_p`, `repetition_penalty`,
+`do_sample`), `max_new_tokens` and `cuda_graph`; other `transformers` `generate()` options raise a `TypeError`.
+`do_sample=False` decodes greedily, as in `inference()`.
+
 
 ```python
 import os
