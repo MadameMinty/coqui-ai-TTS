@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pysbd
 import torch
 from torch import nn
 
@@ -15,9 +14,9 @@ from TTS.config import load_config
 from TTS.tts.configs.vits_config import VitsConfig
 from TTS.tts.models import setup_model as setup_tts_model
 from TTS.tts.models.vits import Vits
-from TTS.tts.utils.languages import normalize_language
 from TTS.utils.audio import AudioProcessor
 from TTS.utils.audio.numpy_transforms import save_wav
+from TTS.utils.custom_segmenter import Segmenter
 from TTS.utils.generic_utils import optional_to_str
 from TTS.vc.configs.openvoice_config import OpenVoiceConfig
 from TTS.vc.models import setup_model as setup_vc_model
@@ -59,7 +58,7 @@ class Synthesizer(nn.Module):
 
         It takes a TTS and a vocoder model and synthesizes speech from the provided text.
 
-        The text is divided into a list of sentences using `pysbd` and synthesizes
+        The text is divided into a list of sentences using `yasbd` and synthesizes
         speech on each sentence separately.
 
         If you have certain special characters in your text, you need to handle
@@ -126,13 +125,7 @@ class Synthesizer(nn.Module):
         if self.tts_model is not None:
             self.segmenter = {}
             for language in self.tts_model.language_manager.language_names:
-                seg_language = normalize_language(language)
-                if seg_language not in pysbd.languages.LANGUAGE_CODES:
-                    logger.info(
-                        "Language `%s` not supported by pySBD, using English for sentence splitting.", seg_language
-                    )
-                    seg_language = "en"
-                self.segmenter[language] = pysbd.Segmenter(language=seg_language, clean=True)
+                self.segmenter[language] = Segmenter(language)
             logger.info("Segmenters initialized for: %s", self.segmenter.keys())
 
     def _load_vc(self, vc_checkpoint: str, vc_config_path: str, *, use_cuda: bool) -> None:

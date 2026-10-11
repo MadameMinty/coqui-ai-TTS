@@ -71,7 +71,7 @@ dependencies = [
     "packaging>=23.1",
     "typing_extensions>=4.13",
     # Inference
-    "pysbd>=0.3.4",
+    "yasbd-lib>=0.16.1,<2",
     # Training
     "matplotlib>=3.8.4",
     # Coqui stack

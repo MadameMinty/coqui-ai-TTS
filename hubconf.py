@@ -1,7 +1,7 @@
 dependencies = [
     "torch",
     "gdown",
-    "pysbd",
+    "yasbd",
     "gruut",
     "anyascii",
     "pypinyin",
