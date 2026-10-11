@@ -94,8 +94,10 @@ def load_model(model_dir: Path | None, device: str, load_kwargs: dict[str, Any])
 def synth(model: Xtts, sentences: list[str], language: str, latents, batch_size: int, seed: int, infer: dict):
     torch.manual_seed(seed)
     if batch_size > 1:
-        return model.inference_batch(sentences, language, *latents, batch_size=batch_size, **infer)["wav"]
-    wavs = [model.inference(s, language, *latents, **infer)["wav"] for s in sentences]
+        outputs = model.inference_batch(sentences, language, *latents, batch_size=batch_size, **infer)
+        wavs = [out["wav"] for out in outputs]
+    else:
+        wavs = [model.inference(s, language, *latents, **infer)["wav"] for s in sentences]
     return torch.cat([torch.as_tensor(w) for w in wavs]).numpy()
 
 
