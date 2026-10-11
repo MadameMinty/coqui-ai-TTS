@@ -114,9 +114,10 @@ class GPT2InferenceModel(GPT2PreTrainedModel, GenerationMixin):
             emb = torch.cat([mel_emb, text_emb], dim=1)
         else:
             emb = self.embeddings(input_ids)
-            emb = emb + self.text_pos_embedding.get_fixed_embedding(
-                attention_mask.shape[1] - (mel_len + 1), attention_mask.device
-            )
+            # transformers >= 5.18 drops an all-ones attention_mask in generate(),
+            # so fall back to the cache length to locate the current position.
+            seq_len = attention_mask.shape[1] if attention_mask is not None else past_key_values.get_seq_length() + 1
+            emb = emb + self.text_pos_embedding.get_fixed_embedding(seq_len - (mel_len + 1), input_ids.device)
 
         transformer_outputs = self.transformer(
             inputs_embeds=emb,
