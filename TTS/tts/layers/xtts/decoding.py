@@ -31,19 +31,25 @@ PREFIX_TOKEN_ID = 1
 
 @dataclass
 class Sampling:
-    """Decoding settings; defaults match `transformers.GenerationConfig`."""
+    """Decoding settings; defaults match `transformers.GenerationConfig`. As in `generate()`, `None` turns a
+    setting off (top_k=None: no top-k filtering)."""
 
-    do_sample: bool = False
-    temperature: float = 1.0
+    do_sample: bool | None = False
+    temperature: float | None = 1.0
     top_k: int | None = 50
-    top_p: float = 1.0
-    repetition_penalty: float = 1.0
+    top_p: float | None = 1.0
+    repetition_penalty: float | None = 1.0
+
+    def __post_init__(self):
+        off = {"do_sample": False, "temperature": 1.0, "top_k": 0, "top_p": 1.0, "repetition_penalty": 1.0}
+        for name, value in off.items():
+            if getattr(self, name) is None:
+                setattr(self, name, value)
 
     @classmethod
     def from_kwargs(cls, kwargs: dict) -> "Sampling":
-        """Pop the supported settings from `kwargs`; `None` values keep the defaults."""
-        settings = {k: kwargs.pop(k) for k in cls.__dataclass_fields__ if k in kwargs}
-        return cls(**{k: v for k, v in settings.items() if v is not None})
+        """Pop the supported settings from `kwargs`; missing ones keep the defaults."""
+        return cls(**{k: kwargs.pop(k) for k in cls.__dataclass_fields__ if k in kwargs})
 
     def processors(self) -> LogitsProcessorList:
         processors = LogitsProcessorList()

@@ -11,6 +11,9 @@ SAMPLING = [
     {"do_sample": False, "repetition_penalty": 10.0},
     {"do_sample": True, "temperature": 0.75, "top_k": 50, "top_p": 0.85, "repetition_penalty": 10.0},
     {"do_sample": True, "temperature": 1.3, "top_k": 5, "top_p": 1.0, "repetition_penalty": 2.0},
+    {"do_sample": True, "temperature": 1.5, "top_k": None},
+    {"do_sample": True, "temperature": None, "top_k": None, "top_p": None, "repetition_penalty": None},
+    {"do_sample": True},
 ]
 
 
@@ -25,9 +28,9 @@ def gpt():
         max_mel_tokens=60,
         max_prompt_tokens=10,
         number_text_tokens=300,
-        num_audio_tokens=40,
-        start_audio_token=38,
-        stop_audio_token=39,
+        num_audio_tokens=300,  # > the default top_k
+        start_audio_token=298,
+        stop_audio_token=299,
     )
     model.init_gpt_for_inference(kv_cache=True)
     return model.eval()
@@ -49,7 +52,10 @@ def test_decode_matches_generate(gpt, sampling, seed):
         expected = gpt.generate(cond, text, use_owned_decoder=False, **sampling)
         torch.manual_seed(seed)
         tokens, _ = run_decode(gpt, cond, text, sampling)
+        torch.manual_seed(seed)
+        owned = gpt.generate(cond, text, **sampling)
     assert torch.equal(tokens, expected)
+    assert torch.equal(owned, expected)
 
 
 def test_decode_latents_match_generate_hidden_states(gpt):
@@ -101,7 +107,8 @@ def test_sampling_from_kwargs_pops_known_keys():
     kwargs = {"temperature": 0.5, "top_k": None, "num_beams": 1}
     sampling = Sampling.from_kwargs(kwargs)
     assert sampling.temperature == 0.5
-    assert sampling.top_k == 50
+    assert sampling.top_k == 0  # None: no top-k, as in generate()
+    assert Sampling.from_kwargs({}).top_k == 50
     assert kwargs == {"num_beams": 1}
 
 
