@@ -144,18 +144,22 @@ def decode(
     emb = torch.cat([prefix_emb.to(token_emb.dtype), token_emb], dim=1)
 
     if cuda_graph and static_decoder.supported(gpt):
-        stepper = static_decoder.StaticDecoder.for_gpt(gpt, batch, emb.shape[1] + max_new_tokens)
+        stepper = static_decoder.StaticDecoder.acquire(gpt, batch, emb.shape[1] + max_new_tokens)
     else:
         stepper = EagerStepper(gpt)
-    latents, logits = stepper.prefill(emb, mask)
-    unfinished = torch.ones(batch, dtype=torch.bool, device=device) if active is None else active.clone()
-    for _ in range(max_new_tokens):
-        scores = processors(seq_ids, logits.float())
-        tokens = torch.where(unfinished, pick_tokens(scores, sampling.do_sample), stop)
-        yield tokens, latents.clone()
+    try:
+        latents, logits = stepper.prefill(emb, mask)
+        unfinished = torch.ones(batch, dtype=torch.bool, device=device) if active is None else active.clone()
+        for _ in range(max_new_tokens):
+            scores = processors(seq_ids, logits.float())
+            tokens = torch.where(unfinished, pick_tokens(scores, sampling.do_sample), stop)
+            yield tokens, latents.clone()
 
-        unfinished &= tokens != stop
-        if not unfinished.any():
-            return
-        seq_ids = torch.cat([seq_ids, tokens[:, None]], dim=1)
-        latents, logits = stepper.step(tokens)
+            unfinished &= tokens != stop
+            if not unfinished.any():
+                return
+            seq_ids = torch.cat([seq_ids, tokens[:, None]], dim=1)
+            latents, logits = stepper.step(tokens)
+    finally:
+        if isinstance(stepper, static_decoder.StaticDecoder):
+            stepper.release()

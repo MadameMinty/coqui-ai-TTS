@@ -766,6 +766,7 @@ class Xtts(BaseTTS):
         ):
             if isinstance(module, torch.nn.Module):
                 module.to(dtype or torch.float32)
+        gpt.clear_static_decoders()  # their graphs point at the old weights
 
     def eval(self):  # pylint: disable=redefined-builtin
         """Sets the model to evaluation mode, preparing the GPT for inference unless already done."""

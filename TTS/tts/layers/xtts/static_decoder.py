@@ -6,6 +6,7 @@ the GPT-2 block weights and covers the configuration XTTS builds: self-attention
 """
 
 import math
+import weakref
 from typing import TYPE_CHECKING
 
 import torch
@@ -20,6 +21,12 @@ CACHE_ROUND = 256
 """Cache length granularity, so similar requests reuse one captured graph."""
 MAX_CACHED = 2
 """Decoders (one per batch size) kept per GPT, e.g. single-sentence streaming plus one batch size."""
+
+
+def weight_pointers(gpt: "GPT") -> tuple:
+    """Storage of every weight the step reads: a captured graph is only valid while these stay put."""
+    modules = (gpt.gpt, gpt.mel_embedding, gpt.mel_pos_embedding, gpt.final_norm, gpt.mel_head)
+    return tuple((p.data_ptr(), p.dtype, p.device) for module in modules for p in module.parameters())
 
 
 def supported(gpt: "GPT") -> bool:
@@ -39,13 +46,15 @@ class StaticDecoder:
     """KV-cached GPT decoder with static shapes: `prefill()` the prompt eagerly, then `step()` one token at a time.
 
     On CUDA the step is captured as a graph on its first call and replayed afterwards. Outputs of `step()` live in
-    static buffers that the next step overwrites.
+    static buffers that the next step overwrites. Get one with `acquire()` and hand it back with `release()`: a
+    decoder serves one decode at a time.
     """
 
     def __init__(self, gpt: "GPT", batch: int, max_len: int, *, use_graph: bool = True):
         param = next(gpt.gpt.parameters())
         config = gpt.gpt.config
-        self.gpt = gpt
+        self._gpt = weakref.ref(gpt)  # the GPT caches its decoders: no reference cycle
+        self.weights = weight_pointers(gpt)
         self.batch = batch
         self.max_len = max_len
         self.dtype = param.dtype
@@ -65,25 +74,35 @@ class StaticDecoder:
         self.latents: torch.Tensor | None = None
         self.logits: torch.Tensor | None = None
 
+    @property
+    def gpt(self) -> "GPT":
+        gpt = self._gpt()
+        if gpt is None:
+            msg = "The GPT of this decoder was deleted"
+            raise RuntimeError(msg)
+        return gpt
+
     @classmethod
-    def for_gpt(cls, gpt: "GPT", batch: int, length: int) -> "StaticDecoder":
-        """A decoder cached on `gpt` per batch size (the `MAX_CACHED` most recent), rebuilt when the device, dtype
-        or a longer sequence needs it."""
-        param = next(gpt.gpt.parameters())
+    def acquire(cls, gpt: "GPT", batch: int, length: int) -> "StaticDecoder":
+        """Take `gpt`'s cached decoder for this batch size, or build one if it is missing, busy in another decode,
+        too short for `length`, or its weights moved (`.to()`, dtype change)."""
         cached: dict[int, StaticDecoder] = gpt.__dict__.setdefault("_static_decoders", {})
         decoder = cached.pop(batch, None)
-        if (
-            decoder is None
-            or decoder.max_len < length
-            or decoder.dtype != param.dtype
-            or decoder.device != param.device
-        ):
+        if decoder is None or decoder.max_len < length or decoder.weights != weight_pointers(gpt):
             del decoder  # free the old buffers before allocating
-            while len(cached) >= MAX_CACHED:
-                cached.pop(next(iter(cached)))
             decoder = cls(gpt, batch, math.ceil(length / CACHE_ROUND) * CACHE_ROUND)
-        cached[batch] = decoder  # most recent last
         return decoder
+
+    def release(self) -> None:
+        """Return the decoder to its GPT's cache, which keeps the `MAX_CACHED` most recent batch sizes."""
+        gpt = self._gpt()
+        if gpt is None:
+            return
+        cached: dict[int, StaticDecoder] = gpt.__dict__.setdefault("_static_decoders", {})
+        cached.pop(self.batch, None)  # replaced by this one
+        while len(cached) >= MAX_CACHED:
+            cached.pop(next(iter(cached)))
+        cached[self.batch] = self
 
     def _qkv(self, block, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch, length, dim = hidden.shape
@@ -153,7 +172,7 @@ class StaticDecoder:
         for buffer, saved in zip((self.write_pos, self.mel_pos, self.valid), state):
             buffer.copy_(saved)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
+        with torch.cuda.graph(self.graph, stream=stream):
             self.latents, self.logits = self._step()
 
     @torch.inference_mode()
@@ -162,7 +181,8 @@ class StaticDecoder:
         self.tokens.copy_(tokens[:, None])
         if not self.use_graph:
             return self._step()
-        if self.graph is None:
-            self._capture()
-        self.graph.replay()
+        with torch.cuda.device(self.device):  # capture and replay on the model's GPU, not the current one
+            if self.graph is None:
+                self._capture()
+            self.graph.replay()
         return self.latents, self.logits
