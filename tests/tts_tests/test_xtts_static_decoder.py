@@ -87,6 +87,9 @@ def test_for_gpt_rebuilds_when_needed():
     assert static_decoder.StaticDecoder.for_gpt(gpt, 1, decoder.max_len) is decoder
     assert static_decoder.StaticDecoder.for_gpt(gpt, 2, 10) is not decoder
     assert static_decoder.StaticDecoder.for_gpt(gpt, 2, decoder.max_len + 1).max_len == 2 * static_decoder.CACHE_ROUND
+    assert static_decoder.StaticDecoder.for_gpt(gpt, 1, 10) is decoder  # kept beside the batch-2 one
+    static_decoder.StaticDecoder.for_gpt(gpt, 3, 10)  # evicts the least recently used: batch 2
+    assert set(gpt._static_decoders) == {1, 3}
 
 
 def test_prefill_rejects_oversized_prompt():

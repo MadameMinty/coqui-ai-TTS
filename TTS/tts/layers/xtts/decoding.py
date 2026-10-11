@@ -105,6 +105,7 @@ def decode(
     sampling: Sampling,
     max_new_tokens: int | None = None,
     cuda_graph: bool = False,
+    active: torch.Tensor | None = None,
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Generate audio tokens after a conditioning + text prefix, one step at a time.
 
@@ -116,6 +117,7 @@ def decode(
         max_new_tokens: Token limit per row, including the stop token. Defaults to `gpt.max_gen_mel_tokens`.
         cuda_graph: Decode with a static KV cache, replaying each step as a CUDA graph. Much faster on CUDA; the
             logits match the default path up to float rounding, so sampled tokens may diverge.
+        active: `[B]` bool, False for filler rows that only keep the batch shape; they emit the stop token.
 
     Yields:
         `(tokens [B], latents [B, D])` per step. `latents` is the normed hidden state that predicted `tokens`, as fed
@@ -140,7 +142,7 @@ def decode(
     else:
         stepper = EagerStepper(gpt)
     latents, logits = stepper.prefill(emb, mask)
-    unfinished = torch.ones(batch, dtype=torch.bool, device=device)
+    unfinished = torch.ones(batch, dtype=torch.bool, device=device) if active is None else active.clone()
     for _ in range(max_new_tokens):
         scores = processors(seq_ids, logits.float())
         tokens = torch.where(unfinished, pick_tokens(scores, sampling.do_sample), stop)

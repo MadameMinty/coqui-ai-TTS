@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 CACHE_ROUND = 256
 """Cache length granularity, so similar requests reuse one captured graph."""
+MAX_CACHED = 2
+"""Decoders (one per batch size) kept per GPT, e.g. single-sentence streaming plus one batch size."""
 
 
 def supported(gpt: "GPT") -> bool:
@@ -65,19 +67,22 @@ class StaticDecoder:
 
     @classmethod
     def for_gpt(cls, gpt: "GPT", batch: int, length: int) -> "StaticDecoder":
-        """The decoder cached on `gpt`, rebuilt when the batch, device, dtype or a longer sequence needs it."""
+        """A decoder cached on `gpt` per batch size (the `MAX_CACHED` most recent), rebuilt when the device, dtype
+        or a longer sequence needs it."""
         param = next(gpt.gpt.parameters())
-        decoder: StaticDecoder | None = getattr(gpt, "_static_decoder", None)
+        cached: dict[int, StaticDecoder] = gpt.__dict__.setdefault("_static_decoders", {})
+        decoder = cached.pop(batch, None)
         if (
             decoder is None
-            or decoder.batch != batch
             or decoder.max_len < length
             or decoder.dtype != param.dtype
             or decoder.device != param.device
         ):
-            gpt._static_decoder = None  # free the old buffers before allocating
+            del decoder  # free the old buffers before allocating
+            while len(cached) >= MAX_CACHED:
+                cached.pop(next(iter(cached)))
             decoder = cls(gpt, batch, math.ceil(length / CACHE_ROUND) * CACHE_ROUND)
-            gpt._static_decoder = decoder
+        cached[batch] = decoder  # most recent last
         return decoder
 
     def _qkv(self, block, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

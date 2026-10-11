@@ -15,6 +15,7 @@ from trainer.io import load_fsspec
 from TTS.config.shared_configs import BaseDatasetConfig
 from TTS.tts.configs.shared_configs import BaseTTSConfig
 from TTS.tts.configs.xtts_config import XttsArgs, XttsAudioConfig, XttsConfig
+from TTS.tts.layers.xtts.decoding import Sampling, decode
 from TTS.tts.layers.xtts.gpt import GPT
 from TTS.tts.layers.xtts.hifigan_decoder import HifiDecoder
 from TTS.tts.layers.xtts.tokenizer import VoiceBpeTokenizer, split_sentence
@@ -368,6 +369,27 @@ class Xtts(BaseTTS):
         """
         if config is not None:
             warn_synthesize_config_deprecated()
+        voice, settings = self._synthesis_inputs(speaker, speaker_wav, voice_dir, language, kwargs)
+        return self.inference(text, language, *voice, **settings)
+
+    def synthesize_batch(
+        self,
+        texts: list[str],
+        *,
+        speaker: str | None = None,
+        speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]] | None = None,
+        voice_dir: str | os.PathLike[Any] | None = None,
+        language: str | None = None,
+        batch_size: int = 8,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        """`synthesize()` for several texts with one voice, decoding `batch_size` of them together; see
+        `inference_batch()`."""
+        voice, settings = self._synthesis_inputs(speaker, speaker_wav, voice_dir, language, kwargs)
+        return self.inference_batch(texts, language, *voice, batch_size=batch_size, **settings)
+
+    def _synthesis_inputs(self, speaker, speaker_wav, voice_dir, language, kwargs: dict[str, Any]):
+        """The cloned or cached voice `(gpt_cond_latent, speaker_embedding)` and the inference settings."""
         if (speaker_id := kwargs.pop("speaker_id", None)) is not None:
             speaker = speaker_id
             warn_synthesize_speaker_id_deprecated()
@@ -396,7 +418,7 @@ class Xtts(BaseTTS):
             voice = self.clone_voice(speaker_wav, speaker, voice_dir, **voice_settings)
             gpt_cond_latent = voice["gpt_conditioning_latents"]
             speaker_embedding = voice["speaker_embedding"]
-        return self.inference(text, language, gpt_cond_latent, speaker_embedding, **inference_settings)
+        return (gpt_cond_latent, speaker_embedding), inference_settings
 
     @torch.inference_mode()
     def inference(
@@ -488,34 +510,126 @@ class Xtts(BaseTTS):
                     output_attentions=False,
                     **hf_generate_kwargs,
                 )
-                expected_output_len = torch.tensor(
-                    [gpt_codes.shape[-1] * self.gpt.code_stride_len], device=text_tokens.device
+                gpt_latents, wav = self._codes_to_audio(
+                    text_tokens, gpt_codes, gpt_cond_latent, speaker_embedding, length_scale
                 )
-
-                text_len = torch.tensor([text_tokens.shape[-1]], device=self.device)
-                gpt_latents = self.gpt(
-                    text_tokens,
-                    text_len,
-                    gpt_codes,
-                    expected_output_len,
-                    cond_latents=gpt_cond_latent,
-                    return_attentions=False,
-                    return_latent=True,
-                ).float()
-
-                if length_scale != 1.0:
-                    gpt_latents = F.interpolate(
-                        gpt_latents.transpose(1, 2), scale_factor=length_scale, mode="linear"
-                    ).transpose(1, 2)
-
-                gpt_latents_list.append(gpt_latents.cpu())
-                wavs.append(self.hifigan_decoder(gpt_latents, g=speaker_embedding).cpu().squeeze())
+                gpt_latents_list.append(gpt_latents)
+                wavs.append(wav)
 
         return {
             "wav": torch.cat(wavs, dim=0).numpy(),
             "gpt_latents": torch.cat(gpt_latents_list, dim=1).numpy(),
             "speaker_embedding": speaker_embedding,
         }
+
+    def _codes_to_audio(self, text_tokens, gpt_codes, gpt_cond_latent, speaker_embedding, length_scale):
+        """GPT latents `[1, T, D]` and waveform `[S]` (both on CPU) for the generated codes of one text."""
+        expected_output_len = torch.tensor([gpt_codes.shape[-1] * self.gpt.code_stride_len], device=self.device)
+        text_len = torch.tensor([text_tokens.shape[-1]], device=self.device)
+        gpt_latents = self.gpt(
+            text_tokens,
+            text_len,
+            gpt_codes,
+            expected_output_len,
+            cond_latents=gpt_cond_latent,
+            return_attentions=False,
+            return_latent=True,
+        ).float()
+        if length_scale != 1.0:
+            gpt_latents = F.interpolate(
+                gpt_latents.transpose(1, 2), scale_factor=length_scale, mode="linear"
+            ).transpose(1, 2)
+        wav = self.hifigan_decoder(gpt_latents, g=speaker_embedding).cpu().squeeze()
+        return gpt_latents.cpu(), wav
+
+    @torch.inference_mode()
+    def inference_batch(
+        self,
+        texts: list[str],
+        language: str,
+        gpt_cond_latent: torch.Tensor,
+        speaker_embedding: torch.Tensor,
+        *,
+        batch_size: int = 8,
+        temperature: float = 0.75,
+        length_penalty: float = 1.0,
+        repetition_penalty: float = 10.0,
+        top_k: int = 50,
+        top_p: float = 0.85,
+        do_sample: bool = True,
+        num_beams: int = 1,
+        speed: float = 1.0,
+        cuda_graph: bool = False,
+        **hf_generate_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """`inference()` for several texts, decoding up to `batch_size` of them together on the GPT.
+
+        Per-step GPU cost barely grows with the batch, so throughput scales almost linearly with it. Texts are
+        grouped by length; with sampling, the draws differ from one-by-one `inference()` calls.
+
+        Returns:
+            One `inference()` output dict per text, in input order.
+        """
+        if num_beams != 1 or self.gpt_batch_size != 1 or hf_generate_kwargs or batch_size < 1:
+            sequential = {"num_beams": num_beams, "cuda_graph": cuda_graph, **hf_generate_kwargs}
+            sampling = {"temperature": temperature, "length_penalty": length_penalty, "top_k": top_k, "top_p": top_p}
+            return [
+                self.inference(
+                    text,
+                    language,
+                    gpt_cond_latent,
+                    speaker_embedding,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=do_sample,
+                    speed=speed,
+                    **sampling,
+                    **sequential,
+                )
+                for text in texts
+            ]
+        language = language.split("-")[0]  # remove the country code
+        length_scale = 1.0 / max(speed, 0.05)
+        gpt_cond_latent = gpt_cond_latent.to(self.device)
+        speaker_embedding = speaker_embedding.to(self.device)
+        sampling = Sampling(
+            do_sample=do_sample,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+        tokens = []
+        for text in texts:
+            text_tokens = torch.IntTensor(self.tokenizer.encode(text.strip().lower(), lang=language)).to(self.device)
+            assert text_tokens.shape[-1] < self.args.gpt_max_text_tokens, (
+                " ❗ XTTS can only generate text with a maximum of 400 tokens."
+            )
+            tokens.append(text_tokens[None])
+
+        outputs: list[dict[str, Any]] = [{} for _ in texts]
+        order = sorted(range(len(texts)), key=lambda i: -tokens[i].shape[-1])
+        for start in range(0, len(order), batch_size):
+            rows = order[start : start + batch_size]
+            prefixes = [self.gpt.prefix_embeddings(gpt_cond_latent, tokens[i])[0] for i in rows]
+            prefixes += [prefixes[0]] * (min(batch_size, len(order)) - len(rows))  # keep one graph shape
+            width = max(p.shape[0] for p in prefixes)
+            emb = torch.stack([F.pad(p, (0, 0, width - p.shape[0], 0)) for p in prefixes])
+            mask = torch.stack([(torch.arange(width, device=self.device) >= width - p.shape[0]) for p in prefixes])
+            active = torch.arange(len(prefixes), device=self.device) < len(rows)
+            steps = decode(self.gpt, emb, mask.long(), sampling=sampling, cuda_graph=cuda_graph, active=active)
+            codes = torch.stack([t for t, _ in steps], dim=1)
+            for row, i in enumerate(rows):
+                stops = (codes[row] == self.gpt.stop_audio_token).nonzero()
+                length = int(stops[0]) + 1 if len(stops) else codes.shape[1]
+                gpt_latents, wav = self._codes_to_audio(
+                    tokens[i], codes[row : row + 1, :length], gpt_cond_latent, speaker_embedding, length_scale
+                )
+                outputs[i] = {
+                    "wav": wav.numpy(),
+                    "gpt_latents": gpt_latents.numpy(),
+                    "speaker_embedding": speaker_embedding,
+                }
+        return outputs
 
     def handle_chunks(self, wav_gen, wav_gen_prev, wav_overlap, overlap_len, is_final=False):
         """Handle chunk formatting, retaining the overlap only until the final chunk."""
