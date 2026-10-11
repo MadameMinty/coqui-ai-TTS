@@ -134,3 +134,38 @@ def test_clone_voice_cache_is_bounded(tmp_path, monkeypatch):
     cloner.clone_voice(wavs[0])  # evicted
     cloner.clone_voice(wavs[2])  # kept
     assert cloner.calls == 4
+
+
+class WeightedCloner(CountingCloner, torch.nn.Module):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        CountingCloner.__init__(self)
+        self.weight = torch.nn.Parameter(torch.zeros(2))
+
+
+def test_clone_voice_cache_follows_weight_updates(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = WeightedCloner()
+    cloner.clone_voice(wav)
+    cloner.clone_voice(wav)
+    assert cloner.calls == 1
+    with torch.no_grad():
+        cloner.weight.add_(1)  # an optimizer step or load_state_dict
+    cloner.clone_voice(wav)
+    assert cloner.calls == 2
+    with torch.inference_mode():
+        cloner.weight = torch.nn.Parameter(torch.ones(2))  # inference tensor: no version counter
+        cloner.clone_voice(wav)
+        cloner.clone_voice(wav)
+    assert cloner.calls == 3
+
+
+def test_models_can_opt_out_of_the_clone_cache(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = CountingCloner()
+    cloner.cache_cloned_voices = False
+    cloner.clone_voice(wav)
+    cloner.clone_voice(wav)
+    assert cloner.calls == 2

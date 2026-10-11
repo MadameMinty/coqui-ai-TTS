@@ -56,6 +56,10 @@ class CloningMixin:
     :py:class:`~TTS.vc.models.base_vc.BaseVC`-derived models.
     """
 
+    cache_cloned_voices = True
+    """Keep cloned voices in memory (see `CLONE_CACHE_SIZE`). Off for models whose cloning is random or whose voices
+    are large."""
+
     def _create_voice_metadata(
         self, model: dict[str, str | float | bool], speaker_id: str, source_files: list[str]
     ) -> VoiceMetadata:
@@ -103,8 +107,8 @@ class CloningMixin:
             return self.load_voice_file(speaker_id, voice_dir)
         key = self._clone_key(speaker_wav, generate_kwargs)
         cache: dict[tuple, tuple[dict[str, Any], dict[str, Any]]] = self.__dict__.setdefault("_voice_cache", {})
-        if key is not None and key in cache:
-            voice, model_metadata = cache[key] = cache.pop(key)  # most recent last
+        if (entry := cache.pop(key, None) if key is not None else None) is not None:
+            voice, model_metadata = cache[key] = entry  # most recent last
             logger.info("Reusing the voice cloned from the same reference audio")
         else:
             voice, model_metadata = self._clone_voice(speaker_wav, **generate_kwargs)
@@ -130,13 +134,19 @@ class CloningMixin:
     def _clone_key(
         self, speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]], generate_kwargs: dict[str, Any]
     ) -> tuple | None:
-        """Identity of a cloning request: reference files (path, size, mtime), settings and device; None if the
-        request can't be cached."""
+        """Identity of a cloning request: reference files (path, size, mtime), settings, device and weights version
+        (bumped by training or loading weights); None if the request can't be cached."""
+        if not self.cache_cloned_voices:
+            return None
         paths = speaker_wav if isinstance(speaker_wav, list) else [speaker_wav]
         try:
             files = tuple((str(Path(p).resolve()), (st := Path(p).stat()).st_size, st.st_mtime_ns) for p in paths)
-            device = str(next(self.parameters()).device) if hasattr(self, "parameters") else None
-            key = (files, tuple(sorted(generate_kwargs.items())), device)
+            weights = None
+            if hasattr(self, "parameters"):
+                params = list(self.parameters())
+                versions = (p.data_ptr() if p.is_inference() else p._version for p in params)  # no counter
+                weights = (str(params[0].device), sum(versions))
+            key = (files, tuple(sorted(generate_kwargs.items())), weights)
             hash(key)
         except (OSError, TypeError, StopIteration):
             return None
