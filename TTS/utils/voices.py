@@ -14,6 +14,9 @@ from TTS.utils.generic_utils import is_pytorch_at_least_2_4, slugify
 
 logger = logging.getLogger(__name__)
 
+CLONE_CACHE_SIZE = 16
+"""Cloned voices kept in memory per model, so repeated calls with the same reference audio skip re-cloning."""
+
 
 @dataclass
 class VoiceMetadata:
@@ -98,8 +101,18 @@ class CloningMixin:
                 msg = "Specified only `speaker_id`, but no `voice_dir` to load the voice from"
                 raise RuntimeError(msg)
             return self.load_voice_file(speaker_id, voice_dir)
-        voice, model_metadata = self._clone_voice(speaker_wav, **generate_kwargs)
-        logger.info("Generated voice from reference audio")
+        key = self._clone_key(speaker_wav, generate_kwargs)
+        cache: dict[tuple, tuple[dict[str, Any], dict[str, Any]]] = self.__dict__.setdefault("_voice_cache", {})
+        if key is not None and key in cache:
+            voice, model_metadata = cache[key] = cache.pop(key)  # most recent last
+            logger.info("Reusing the voice cloned from the same reference audio")
+        else:
+            voice, model_metadata = self._clone_voice(speaker_wav, **generate_kwargs)
+            logger.info("Generated voice from reference audio")
+            if key is not None:
+                cache[key] = (voice, model_metadata)
+                while len(cache) > CLONE_CACHE_SIZE:
+                    cache.pop(next(iter(cache)))
         if speaker_id is not None and voice_dir is not None:
             speaker_id_slug = slugify(speaker_id)
             voice_fn = Path(voice_dir) / f"{speaker_id_slug}.pth"
@@ -112,7 +125,22 @@ class CloningMixin:
             voice_dict = {**voice, "metadata": metadata.to_dict()}
             torch.save(voice_dict, voice_fn)
             logger.info("Voice `%s` saved to: %s", speaker_id, voice_fn)
-        return voice
+        return dict(voice)
+
+    def _clone_key(
+        self, speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]], generate_kwargs: dict[str, Any]
+    ) -> tuple | None:
+        """Identity of a cloning request: reference files (path, size, mtime), settings and device; None if the
+        request can't be cached."""
+        paths = speaker_wav if isinstance(speaker_wav, list) else [speaker_wav]
+        try:
+            files = tuple((str(Path(p).resolve()), (st := Path(p).stat()).st_size, st.st_mtime_ns) for p in paths)
+            device = str(next(self.parameters()).device) if hasattr(self, "parameters") else None
+            key = (files, tuple(sorted(generate_kwargs.items())), device)
+            hash(key)
+        except (OSError, TypeError, StopIteration):
+            return None
+        return key
 
     def _clone_voice(
         self,
