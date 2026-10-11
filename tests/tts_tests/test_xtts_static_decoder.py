@@ -115,3 +115,11 @@ def test_unsupported_gpt_falls_back(monkeypatch):
     gpt = make_gpt("cpu")
     monkeypatch.setattr(gpt.mel_pos_embedding, "relative", True)
     assert not static_decoder.supported(gpt)
+
+
+def test_clear_static_decoders():
+    gpt = make_gpt("cpu")
+    static_decoder.StaticDecoder.for_gpt(gpt, 1, 10)
+    gpt.clear_static_decoders()
+    assert not getattr(gpt, "_static_decoders", None)
+    gpt.clear_static_decoders()  # idempotent

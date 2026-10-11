@@ -163,6 +163,10 @@ class GPT(nn.Module):
             )
             self.gpt_inference = self.ds_engine.module.eval()
 
+    def clear_static_decoders(self) -> None:
+        """Free the KV caches and CUDA graphs kept for `cuda_graph` decoding."""
+        self.__dict__.pop("_static_decoders", None)
+
     def set_inputs_and_targets(self, input, start_token, stop_token):
         inp = F.pad(input, (1, 0), value=start_token)
         tar = F.pad(input, (0, 1), value=stop_token)
