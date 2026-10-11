@@ -63,3 +63,23 @@ def test_unsupported_options_fall_back_to_sequential(xtts, monkeypatch):
     outputs = model.inference_batch(TEXTS[:2], "en", *voice, num_beams=2)
     assert [o["wav"] for o in outputs] == TEXTS[:2]
     assert all(k["num_beams"] == 2 for _, k in calls)
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+@pytest.mark.parametrize("speed", [1.0, 1.3])
+def test_inference_stream_end_to_end(xtts, cuda_graph, speed):
+    model, voice = xtts
+    with torch.inference_mode():
+        chunks = list(
+            model.inference_stream(TEXTS[1], "en", *voice, stream_chunk_size=4, speed=speed, cuda_graph=cuda_graph)
+        )
+        short = list(model.inference_stream(TEXTS[1], "en", *voice, max_new_tokens=3, do_sample=False))
+    wav = torch.cat(chunks)
+    assert wav.ndim == 1 and len(wav) > 0 and torch.isfinite(wav).all()
+    assert len(torch.cat(short)) <= 3 * 1024 * 24000 // 22050 + 1  # 3 tokens of audio at most
+
+
+def test_inference_stream_rejects_unsupported_generate_options(xtts):
+    model, voice = xtts
+    with pytest.raises(TypeError, match="no_repeat_ngram_size"):
+        next(model.inference_stream(TEXTS[0], "en", *voice, no_repeat_ngram_size=3))

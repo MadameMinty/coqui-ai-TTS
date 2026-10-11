@@ -552,12 +552,24 @@ class GPT(nn.Module):
             return gen.sequences[:, gpt_inputs.shape[1] :], gen
         return gen[:, gpt_inputs.shape[1] :]
 
-    def get_generator(self, cond_latents, text_inputs, *, cuda_graph: bool = False, **sampling_kwargs):
-        """Stream `(token, latent)` pairs per step for a single sequence; see `decoding.decode`."""
+    def get_generator(
+        self,
+        cond_latents,
+        text_inputs,
+        *,
+        cuda_graph: bool = False,
+        max_new_tokens: int | None = None,
+        **sampling_kwargs,
+    ):
+        """Stream `(token, latent)` pairs per step for a single sequence; see `decoding.decode`.
+
+        Takes the sampling settings of `decoding.Sampling`; other `transformers` `generate()` options are not
+        supported when streaming.
+        """
         kwargs = dict(sampling_kwargs)
         sampling = Sampling.from_kwargs(kwargs)
         if kwargs:
             msg = f"Unsupported streaming generation arguments: {sorted(kwargs)}"
             raise TypeError(msg)
         prefix = self.prefix_embeddings(cond_latents, text_inputs)
-        return decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph)
+        return decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph, max_new_tokens=max_new_tokens)
