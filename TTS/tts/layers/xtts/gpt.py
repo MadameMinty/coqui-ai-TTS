@@ -132,6 +132,8 @@ class GPT(nn.Module):
         seq_length = self.max_prompt_tokens + self.max_mel_tokens + self.max_text_tokens + 1
         gpt_config = GPT2Config(
             vocab_size=self.max_mel_tokens,
+            bos_token_id=None,  # GPT-2's text ids; generate() gets the audio ones
+            eos_token_id=None,
             n_positions=seq_length,
             n_ctx=seq_length,
             n_embd=self.model_dim,

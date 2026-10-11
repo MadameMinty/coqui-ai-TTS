@@ -226,6 +226,8 @@ def build_hf_gpt_transformer(
 
     gpt_config = GPT2Config(
         vocab_size=256,  # Unused.
+        bos_token_id=None,  # GPT-2's text ids; generate() gets the audio ones
+        eos_token_id=None,
         n_positions=max_mel_seq_len + max_text_seq_len + max_prompt_len,
         n_ctx=max_mel_seq_len + max_text_seq_len + max_prompt_len,
         n_embd=model_dim,
@@ -374,6 +376,8 @@ class UnifiedVoice(nn.Module):
         seq_length = self.max_mel_tokens + self.max_text_tokens + 2
         gpt_config = GPT2Config(
             vocab_size=self.max_mel_tokens,
+            bos_token_id=None,  # GPT-2's text ids; generate() gets the audio ones
+            eos_token_id=None,
             n_positions=seq_length,
             n_ctx=seq_length,
             n_embd=self.model_dim,
