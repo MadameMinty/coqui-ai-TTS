@@ -103,3 +103,20 @@ def test_sampling_from_kwargs_pops_known_keys():
     assert sampling.temperature == 0.5
     assert sampling.top_k == 50
     assert kwargs == {"num_beams": 1}
+
+
+def test_gpt_uses_sdpa(gpt):
+    assert gpt.gpt.config._attn_implementation == "sdpa"
+
+
+def test_xtts_eval_keeps_inference_gpt():
+    from TTS.tts.configs.xtts_config import XttsArgs, XttsConfig
+    from TTS.tts.models.xtts import Xtts
+
+    args = XttsArgs(gpt_layers=1, gpt_n_model_channels=64, gpt_n_heads=2, gpt_number_text_tokens=300)
+    model = Xtts(XttsConfig(model_args=args))
+    model.eval()
+    inference_gpt = model.gpt.gpt_inference
+    model.train()
+    model.eval()
+    assert model.gpt.gpt_inference is inference_gpt

@@ -620,9 +620,10 @@ class Xtts(BaseTTS):
         )
 
     def eval(self):  # pylint: disable=redefined-builtin
-        """Sets the model to evaluation mode. Overrides the default eval() method to also set the GPT model to eval mode."""
-        self.gpt.init_gpt_for_inference()
-        super().eval()
+        """Sets the model to evaluation mode, preparing the GPT for inference unless already done."""
+        if not hasattr(self.gpt, "gpt_inference"):
+            self.gpt.init_gpt_for_inference(kv_cache=self.args.kv_cache)
+        return super().eval()
 
     def _load_checkpoint(self, model_path: Path) -> dict:
         try:
