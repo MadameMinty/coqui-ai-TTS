@@ -206,6 +206,7 @@ pip install deepspeed
 - `top_p`: Lower values mean the decoder produces more "likely" (aka boring) outputs. Defaults to 0.8.
 - `speed`: The speed rate of the generated audio. Defaults to 1.0. (can produce artifacts if far from 1.0)
 - `enable_text_splitting`: Whether to split the text into sentences and generate audio for each sentence. It allows you to have infinite input length but might loose important context between sentences. Defaults to False.
+- `cuda_graph`: Decode with a static KV cache replayed as a CUDA graph; much faster on CUDA. See [Faster inference](#faster-inference). Defaults to False.
 
 
 #### Inference
@@ -245,10 +246,56 @@ You can also use the Coqui speakers:
 gpt_cond_latent, speaker_embedding = model.speaker_manager.speakers["Ana Florence"].values()
 ```
 
+#### Faster inference
+
+Decoding the GPT's audio tokens takes nearly all of the inference time, and it runs one token per step. Three
+opt-in settings speed it up on CUDA. They combine:
+
+- `cuda_graph=True` (inference argument): decode over a static KV cache and replay each step as a CUDA graph,
+  which removes most per-token kernel launch overhead. Output matches the default path.
+- `gpt_dtype="fp16"` or `"bf16"`: run the GPT in half precision. Set it through `load_checkpoint(...,
+  gpt_dtype=...)`, `model.set_gpt_dtype(...)` or `model_args.gpt_dtype` in the config. The conditioning encoders
+  and the HiFi-GAN decoder stay in float32.
+- Batching: `model.inference_batch(texts, ...)`, `tts.tts_batch(texts, ..., batch_size=8)` or
+  `tts.tts(text, ..., batch_size=8)` decode several sentences together. With sampling, the random draws differ
+  from one-by-one calls.
+
+```python
+from TTS.api import TTS
+
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+tts.synthesizer.tts_model.set_gpt_dtype("fp16")
+wavs = tts.tts_batch(
+    ["First paragraph. With two sentences.", "Second paragraph."],
+    speaker_wav="reference.wav",
+    language="en",
+    batch_size=8,
+    cuda_graph=True,
+)
+```
+
+Repeated calls with the same `speaker_wav` reuse the cloned voice instead of recomputing it.
+
+Real-time factor (lower is faster) on an RTX 4080 SUPER, measured with `scripts/bench_xtts.py`:
+
+| Setting | 1 sentence | 5 sentences | Streaming, first chunk |
+|---|---|---|---|
+| default (float32) | 0.30 | 0.30 | 275 ms |
+| `cuda_graph=True` | 0.16 | 0.15 | 169 ms |
+| + `gpt_dtype="fp16"` | 0.09 | 0.09 | 98 ms |
+| + `batch_size=8` | 0.09 | 0.03 | - |
+
+Whisper word error rates over 32 sentences in English, German and Polish stayed within sampling noise for fp16,
+bf16 and batching. bf16 is as fast as fp16 with more numeric headroom.
+
 #### Streaming manually
 
 Here the goal is to stream the audio as it is being generated. This is useful for real-time applications.
 Streaming inference is typically slower than regular inference, but it allows to get a first chunk of audio faster.
+
+`inference_stream()` takes the sampling settings (`temperature`, `top_k`, `top_p`, `repetition_penalty`,
+`do_sample`), `max_new_tokens` and `cuda_graph`; other `transformers` `generate()` options raise a `TypeError`.
+`do_sample=False` decodes greedily, as in `inference()`.
 
 
 ```python

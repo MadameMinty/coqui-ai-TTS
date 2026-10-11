@@ -223,6 +223,8 @@ class Tortoise(BaseTTS):
         >>> model.load_checkpoint(config, checkpoint_dir="paths/to/models_dir/", eval=True)
     """
 
+    cache_cloned_voices = False  # cloning crops long references at random
+
     config: TortoiseConfig
     args: TortoiseArgs
 

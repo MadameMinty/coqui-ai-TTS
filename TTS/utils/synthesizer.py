@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -346,6 +347,7 @@ class Synthesizer(nn.Module):
         *,
         split_sentences: bool = True,
         return_dict: bool = False,
+        batch_size: int = 1,
         **kwargs: Any,
     ) -> list[int] | dict[str, Any]:
         """🐸 TTS magic. Run all the models and generate speech.
@@ -361,6 +363,8 @@ class Synthesizer(nn.Module):
             source_speaker_name ([type], optional): speaker id of source waveform. Defaults to None.
             split_sentences (bool, optional): split the input text into sentences. Defaults to True.
             return_dict (bool, optional): return additional outputs as a dictionary. Defaults to False.
+            batch_size (int, optional): decode up to this many sentences together, for models with
+                `synthesize_batch()` (XTTS). Defaults to 1.
             **kwargs: additional arguments to pass to the TTS model.
 
         Returns:
@@ -389,36 +393,21 @@ class Synthesizer(nn.Module):
             logger.info("Input: %s", sens)
 
         voice_dir = Path(d) if (d := kwargs.pop("voice_dir", None)) is not None else self.voice_dir
-        vocoder_device = "cpu"
-        use_gl = self.vocoder_model is None
-        if not use_gl:
-            vocoder_device = next(self.vocoder_model.parameters()).device
-        if self.use_cuda:
-            vocoder_device = "cuda"
+        use_gl, vocoder_device = self._vocoder_setup()
 
         if not source_wav:  # not voice conversion
-            for sen in sens:
-                outputs = self.tts_model.synthesize(
-                    text=sen,
-                    speaker=speaker_name,
-                    voice_dir=voice_dir,
-                    speaker_wav=speaker_wav,
-                    language=language_name,
-                    use_griffin_lim=use_gl,
-                    **kwargs,
-                )
-                if use_gl:
-                    waveform = outputs["wav"]
-                else:
-                    waveform = self._run_vocoder(outputs["outputs"]["model_outputs"][0], vocoder_device)
-                if isinstance(waveform, torch.Tensor):
-                    waveform = waveform.cpu().numpy()
-                waveform = waveform.squeeze()
-
-                # trim silence
-                if self.tts_config.audio.get("do_trim_silence"):
-                    waveform = waveform[: self.tts_model.ap.find_endpoint(waveform)]
-
+            all_outputs = self._synthesize_sentences(
+                sens,
+                batch_size,
+                speaker=speaker_name,
+                voice_dir=voice_dir,
+                speaker_wav=speaker_wav,
+                language=language_name,
+                use_griffin_lim=use_gl,
+                **kwargs,
+            )
+            for sen, outputs in zip(sens, all_outputs):
+                waveform = self._sentence_waveform(outputs, use_gl, vocoder_device)
                 wavs += list(waveform)
                 wavs += [0] * PAD_SILENCE_SAMPLES
 
@@ -451,3 +440,74 @@ class Synthesizer(nn.Module):
         if return_dict:
             return {"wav": wavs, "text": text, "segments": segments}
         return wavs
+
+    def tts_batch(
+        self,
+        texts: list[str],
+        speaker_name: str | None = None,
+        language_name: str | None = None,
+        speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]] | None = None,
+        *,
+        split_sentences: bool = True,
+        batch_size: int = 8,
+        **kwargs: Any,
+    ) -> list[list[float]]:
+        """`tts()` for several texts with one voice, decoding the sentences of all texts together.
+
+        Models with `synthesize_batch()` (XTTS) decode up to `batch_size` sentences at once; others go one by one.
+
+        Returns:
+            One waveform per text, as `tts()` returns it.
+        """
+        if self.tts_model is None:
+            msg = "Text-to-speech model not loaded"
+            raise RuntimeError(msg)
+        groups = [self.split_into_sentences(t, language_name) if split_sentences else [t] for t in texts]
+        voice_dir = Path(d) if (d := kwargs.pop("voice_dir", None)) is not None else self.voice_dir
+        use_gl, vocoder_device = self._vocoder_setup()
+        all_outputs = iter(
+            self._synthesize_sentences(
+                [sen for group in groups for sen in group],
+                batch_size,
+                speaker=speaker_name,
+                voice_dir=voice_dir,
+                speaker_wav=speaker_wav,
+                language=language_name,
+                use_griffin_lim=use_gl,
+                **kwargs,
+            )
+        )
+        wavs = []
+        for group in groups:
+            wav = []
+            for _ in group:
+                wav += list(self._sentence_waveform(next(all_outputs), use_gl, vocoder_device))
+                wav += [0] * PAD_SILENCE_SAMPLES
+            wavs.append(wav)
+        return wavs
+
+    def _vocoder_setup(self) -> tuple[bool, str | torch.device]:
+        """Whether the model makes waveforms itself (no vocoder), and the vocoder device."""
+        use_gl = self.vocoder_model is None
+        vocoder_device = "cpu" if use_gl else next(self.vocoder_model.parameters()).device
+        if self.use_cuda:
+            vocoder_device = "cuda"
+        return use_gl, vocoder_device
+
+    def _synthesize_sentences(self, sentences: list[str], batch_size: int, **kwargs: Any) -> Iterable[dict[str, Any]]:
+        """Model outputs per sentence, decoded `batch_size` at a time when the model supports it."""
+        if batch_size > 1 and hasattr(self.tts_model, "synthesize_batch"):
+            return self.tts_model.synthesize_batch(sentences, batch_size=batch_size, **kwargs)
+        return (self.tts_model.synthesize(text=sentence, **kwargs) for sentence in sentences)
+
+    def _sentence_waveform(self, outputs: dict[str, Any], use_gl: bool, vocoder_device) -> np.ndarray:
+        if use_gl:
+            waveform = outputs["wav"]
+        else:
+            waveform = self._run_vocoder(outputs["outputs"]["model_outputs"][0], vocoder_device)
+        if isinstance(waveform, torch.Tensor):
+            waveform = waveform.cpu().numpy()
+        waveform = waveform.squeeze()
+        if self.tts_config.audio.get("do_trim_silence"):
+            waveform = waveform[: self.tts_model.ap.find_endpoint(waveform)]
+        return waveform

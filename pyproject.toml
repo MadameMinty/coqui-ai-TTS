@@ -81,7 +81,7 @@ dependencies = [
     "ko-speech-tools>=0.1.0",
     # Tortoise
     "einops>=0.6.0",
-    "transformers>=4.57,<5.1",
+    "transformers>=4.57,<6",
     "huggingface-hub>=0.36.0",
     # XTTS
     "num2words>=0.5.14",
@@ -146,7 +146,8 @@ all = [
 
 [tool.uv]
 required-environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
 conflicts = [
   [
@@ -180,7 +181,7 @@ explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu128"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 

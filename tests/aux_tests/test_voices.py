@@ -87,3 +87,85 @@ def test_bark_load_pth_voice(bark, tmp_path):
 def test_bark_load_voice_file_not_found(bark, tmp_path):
     with pytest.raises(FileNotFoundError, match=r"`my_voice\.pth` or \.npz for speaker `my\.voice`"):
         bark.load_voice_file("my.voice", tmp_path)
+
+
+class CountingCloner(DummyCloner):
+    def __init__(self):
+        self.calls = 0
+
+    def _clone_voice(self, speaker_wav, **kwargs):
+        self.calls += 1
+        return super()._clone_voice(speaker_wav, **kwargs)
+
+
+def test_clone_voice_reuses_same_reference_audio(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = CountingCloner()
+    first = cloner.clone_voice(str(wav), gpt_cond_len=6)
+    second = cloner.clone_voice(wav, gpt_cond_len=6)
+    assert cloner.calls == 1
+    assert torch.equal(first["emb"], second["emb"]) and first is not second
+    cloner.clone_voice(wav, gpt_cond_len=3)  # other settings
+    assert cloner.calls == 2
+    wav.write_bytes(b"changed")  # other size
+    cloner.clone_voice(wav, gpt_cond_len=6)
+    assert cloner.calls == 3
+
+
+def test_clone_voice_cache_still_saves_voice_file(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = CountingCloner()
+    cloner.clone_voice(wav)
+    cloner.clone_voice(wav, "cached", tmp_path / "voices")
+    assert cloner.calls == 1
+    assert (tmp_path / "voices" / "cached.pth").is_file()
+
+
+def test_clone_voice_cache_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr("TTS.utils.voices.CLONE_CACHE_SIZE", 2)
+    cloner = CountingCloner()
+    wavs = []
+    for i in range(3):
+        wavs.append(tmp_path / f"{i}.wav")
+        wavs[-1].write_bytes(b"x")
+        cloner.clone_voice(wavs[-1])
+    cloner.clone_voice(wavs[0])  # evicted
+    cloner.clone_voice(wavs[2])  # kept
+    assert cloner.calls == 4
+
+
+class WeightedCloner(CountingCloner, torch.nn.Module):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        CountingCloner.__init__(self)
+        self.weight = torch.nn.Parameter(torch.zeros(2))
+
+
+def test_clone_voice_cache_follows_weight_updates(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = WeightedCloner()
+    cloner.clone_voice(wav)
+    cloner.clone_voice(wav)
+    assert cloner.calls == 1
+    with torch.no_grad():
+        cloner.weight.add_(1)  # an optimizer step or load_state_dict
+    cloner.clone_voice(wav)
+    assert cloner.calls == 2
+    with torch.inference_mode():
+        cloner.weight = torch.nn.Parameter(torch.ones(2))  # inference tensor: no version counter
+        cloner.clone_voice(wav)
+        cloner.clone_voice(wav)
+    assert cloner.calls == 3
+
+
+def test_models_can_opt_out_of_the_clone_cache(tmp_path):
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"one")
+    cloner = CountingCloner()
+    cloner.cache_cloned_voices = False
+    cloner.clone_voice(wav)
+    cloner.clone_voice(wav)
+    assert cloner.calls == 2

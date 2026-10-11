@@ -13,6 +13,7 @@ from TTS.tts.layers.tortoise.autoregressive import (
     _prepare_attention_mask_for_generation,
     build_hf_gpt_transformer,
 )
+from TTS.tts.layers.xtts.decoding import PREFIX_TOKEN_ID, Sampling, decode
 from TTS.tts.layers.xtts.gpt_inference import GPT2InferenceModel
 from TTS.tts.layers.xtts.perceiver_encoder import PerceiverResampler
 
@@ -131,6 +132,8 @@ class GPT(nn.Module):
         seq_length = self.max_prompt_tokens + self.max_mel_tokens + self.max_text_tokens + 1
         gpt_config = GPT2Config(
             vocab_size=self.max_mel_tokens,
+            bos_token_id=None,  # GPT-2's text ids; generate() gets the audio ones
+            eos_token_id=None,
             n_positions=seq_length,
             n_ctx=seq_length,
             n_embd=self.model_dim,
@@ -161,6 +164,10 @@ class GPT(nn.Module):
                 replace_with_kernel_inject=True,  # replace the model with the kernel injector
             )
             self.gpt_inference = self.ds_engine.module.eval()
+
+    def clear_static_decoders(self) -> None:
+        """Free the KV caches and CUDA graphs kept for `cuda_graph` decoding."""
+        self.__dict__.pop("_static_decoders", None)
 
     def set_inputs_and_targets(self, input, start_token, stop_token):
         inp = F.pad(input, (1, 0), value=start_token)
@@ -195,6 +202,7 @@ class GPT(nn.Module):
     ):
         if prompt is not None:
             offset = prompt.shape[1]
+            prompt = prompt.to(first_inputs.dtype)
             if second_inputs is not None:
                 emb = torch.cat([prompt, first_inputs, second_inputs], dim=1)
             else:
@@ -477,22 +485,26 @@ class GPT(nn.Module):
     def inference(self, cond_latents, text_inputs, **hf_generate_kwargs):
         return self.generate(cond_latents, text_inputs, **hf_generate_kwargs)
 
+    def prefix_embeddings(self, cond_latents: torch.Tensor, text_inputs: torch.Tensor) -> torch.Tensor:
+        """Conditioning latents followed by the embedded text, wrapped in start/stop text tokens."""
+        text_inputs = F.pad(text_inputs, (0, 1), value=self.stop_text_token)
+        text_inputs = F.pad(text_inputs, (1, 0), value=self.start_text_token)
+        emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
+        return torch.cat([cond_latents.to(emb.dtype), emb], dim=1)
+
     def compute_embeddings(
         self,
         cond_latents,
         text_inputs,
     ):
-        text_inputs = F.pad(text_inputs, (0, 1), value=self.stop_text_token)
-        text_inputs = F.pad(text_inputs, (1, 0), value=self.start_text_token)
-        emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
-        emb = torch.cat([cond_latents, emb], dim=1)
+        emb = self.prefix_embeddings(cond_latents, text_inputs)
         self.gpt_inference.store_prefix_emb(emb)
         gpt_inputs = torch.full(
             (
                 emb.shape[0],
                 emb.shape[1] + 1,  # +1 for the start_audio_token
             ),
-            fill_value=1,
+            fill_value=PREFIX_TOKEN_ID,
             dtype=torch.long,
             device=text_inputs.device,
         )
@@ -503,8 +515,27 @@ class GPT(nn.Module):
         self,
         cond_latents,
         text_inputs,
+        *,
+        use_owned_decoder: bool = True,
+        cuda_graph: bool = False,
         **hf_generate_kwargs,
     ):
+        """Generate audio codes `[B, T]`, padded with the stop token after it.
+
+        Uses the owned decode loop unless it can't honor the arguments (beam search, several return sequences, or
+        other `generate()` options); then `transformers` `generate()`. `cuda_graph`: see `decoding.decode`.
+        """
+        kwargs = dict(hf_generate_kwargs)
+        sampling = Sampling.from_kwargs(kwargs)
+        for key, neutral in (("num_beams", 1), ("num_return_sequences", 1), ("output_attentions", False)):
+            if kwargs.get(key, neutral) == neutral:
+                kwargs.pop(key, None)
+        kwargs.pop("length_penalty", None)  # beam search only
+        if use_owned_decoder and not kwargs:
+            prefix = self.prefix_embeddings(cond_latents, text_inputs)
+            steps = decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph)
+            return torch.stack([tokens for tokens, _ in steps], dim=1)
+
         gpt_inputs = self.compute_embeddings(cond_latents, text_inputs)
         stop_token_tensor = torch.tensor(self.stop_audio_token, device=gpt_inputs.device, dtype=torch.long)
         attention_mask = _prepare_attention_mask_for_generation(gpt_inputs, stop_token_tensor, stop_token_tensor)
@@ -521,15 +552,24 @@ class GPT(nn.Module):
             return gen.sequences[:, gpt_inputs.shape[1] :], gen
         return gen[:, gpt_inputs.shape[1] :]
 
-    def get_generator(self, fake_inputs, **hf_generate_kwargs):
-        stop_token_tensor = torch.tensor(self.stop_audio_token, device=fake_inputs.device, dtype=torch.long)
-        attention_mask = _prepare_attention_mask_for_generation(fake_inputs, stop_token_tensor, stop_token_tensor)
-        return self.gpt_inference.generate_stream(
-            fake_inputs,
-            bos_token_id=self.start_audio_token,
-            pad_token_id=self.stop_audio_token,
-            eos_token_id=self.stop_audio_token,
-            max_length=self.max_gen_mel_tokens + fake_inputs.shape[-1],
-            attention_mask=attention_mask,
-            **hf_generate_kwargs,
-        )
+    def get_generator(
+        self,
+        cond_latents,
+        text_inputs,
+        *,
+        cuda_graph: bool = False,
+        max_new_tokens: int | None = None,
+        **sampling_kwargs,
+    ):
+        """Stream `(token, latent)` pairs per step for a single sequence; see `decoding.decode`.
+
+        Takes the sampling settings of `decoding.Sampling`; other `transformers` `generate()` options are not
+        supported when streaming.
+        """
+        kwargs = dict(sampling_kwargs)
+        sampling = Sampling.from_kwargs(kwargs)
+        if kwargs:
+            msg = f"Unsupported streaming generation arguments: {sorted(kwargs)}"
+            raise TypeError(msg)
+        prefix = self.prefix_embeddings(cond_latents, text_inputs)
+        return decode(self, prefix, sampling=sampling, cuda_graph=cuda_graph, max_new_tokens=max_new_tokens)

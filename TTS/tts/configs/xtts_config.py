@@ -49,11 +49,14 @@ class XttsArgs(ModelArgs):
         gpt_code_stride_len (int, optional): The hop_size of dvae and consequently of the gpt output. Defaults to 1024.
         gpt_use_masking_gt_prompt_approach (bool, optional):  If True, it will use ground truth as prompt and it will mask the loss to avoid repetition. Defaults to True.
         gpt_use_perceiver_resampler (bool, optional):  If True, it will use perceiver resampler from flamingo paper - https://arxiv.org/abs/2204.14198. Defaults to False.
+        gpt_dtype (str, optional): Inference dtype of the GPT: "fp16" or "bf16" halve its memory traffic; conditioning
+            and the HiFi-GAN decoder stay float32. Defaults to None (float32).
     """
 
     gpt_batch_size: int = 1
     enable_redaction: bool = False
     kv_cache: bool = True
+    gpt_dtype: str = None
     gpt_checkpoint: str = None
     clvp_checkpoint: str = None
     decoder_checkpoint: str = None

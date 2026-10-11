@@ -82,6 +82,7 @@ class HifiDecoder(torch.nn.Module):
             Tensor: [B, 1, T]
         """
 
+        latents = latents.to(self.waveform_decoder.conv_pre.weight.dtype)
         z = torch.nn.functional.interpolate(
             latents.transpose(1, 2),
             scale_factor=[self.ar_mel_length_compression / self.output_hop_length],

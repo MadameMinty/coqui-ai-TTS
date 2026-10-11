@@ -49,6 +49,8 @@ class KNNVC(CloningMixin, BaseVC):
         >>> model = KNNVC(config)
     """
 
+    cache_cloned_voices = False  # a voice is the reference's full feature matrix, ~100 MB
+
     config: KNNVCConfig
 
     def __init__(self, config: Coqpit):
