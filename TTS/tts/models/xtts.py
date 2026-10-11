@@ -28,6 +28,16 @@ from TTS.utils.generic_utils import (
 
 logger = logging.getLogger(__name__)
 
+GPT_DTYPES = {
+    "fp32": torch.float32,
+    "float32": torch.float32,
+    "fp16": torch.float16,
+    "float16": torch.float16,
+    "half": torch.float16,
+    "bf16": torch.bfloat16,
+    "bfloat16": torch.bfloat16,
+}
+
 
 def wav_to_mel_cloning(
     wav,
@@ -491,7 +501,7 @@ class Xtts(BaseTTS):
                     cond_latents=gpt_cond_latent,
                     return_attentions=False,
                     return_latent=True,
-                )
+                ).float()
 
                 if length_scale != 1.0:
                     gpt_latents = F.interpolate(
@@ -619,6 +629,30 @@ class Xtts(BaseTTS):
             "XTTS has a dedicated trainer, please check the XTTS docs: https://coqui-tts.readthedocs.io/en/latest/models/xtts.html#training"
         )
 
+    def set_gpt_dtype(self, dtype: str | torch.dtype | None) -> None:
+        """Run the GPT (transformer, embeddings, heads) in `dtype`, e.g. "bf16" or "fp16"; `None` means float32.
+
+        The conditioning encoders and the HiFi-GAN decoder stay float32.
+        """
+        if isinstance(dtype, str):
+            if dtype.lower() not in GPT_DTYPES:
+                msg = f"Unknown GPT dtype {dtype!r}, use one of {sorted(GPT_DTYPES)}"
+                raise ValueError(msg)
+            dtype = GPT_DTYPES[dtype.lower()]
+        gpt = self.gpt
+        for module in (
+            gpt.gpt,
+            gpt.text_embedding,
+            gpt.text_pos_embedding,
+            gpt.mel_embedding,
+            gpt.mel_pos_embedding,
+            gpt.final_norm,
+            gpt.text_head,
+            gpt.mel_head,
+        ):
+            if isinstance(module, torch.nn.Module):
+                module.to(dtype or torch.float32)
+
     def eval(self):  # pylint: disable=redefined-builtin
         """Sets the model to evaluation mode, preparing the GPT for inference unless already done."""
         if not hasattr(self.gpt, "gpt_inference"):
@@ -668,6 +702,7 @@ class Xtts(BaseTTS):
         strict: bool = True,
         use_deepspeed: bool = False,
         speaker_file_path: str | os.PathLike[Any] | None = None,
+        gpt_dtype: str | torch.dtype | None = None,
     ):
         """
         Loads a checkpoint from disk and initializes the model's state and tokenizer.
@@ -679,6 +714,8 @@ class Xtts(BaseTTS):
             vocab_path (str, optional): The path to the vocabulary file. Defaults to None.
             eval (bool, optional): Whether to set the model to evaluation mode. Defaults to True.
             strict (bool, optional): Whether to strictly enforce that the keys in the checkpoint match the keys in the model. Defaults to True.
+            gpt_dtype (str or torch.dtype, optional): GPT inference dtype, see `set_gpt_dtype()`. Defaults to
+                `model_args.gpt_dtype`.
 
         Returns:
             None
@@ -731,6 +768,8 @@ class Xtts(BaseTTS):
             self.hifigan_decoder.eval()
             self.gpt.init_gpt_for_inference(kv_cache=self.args.kv_cache, use_deepspeed=use_deepspeed)
             self.gpt.eval()
+            if (gpt_dtype := gpt_dtype or self.args.gpt_dtype) is not None:
+                self.set_gpt_dtype(gpt_dtype)
 
     def train_step(self):
         raise NotImplementedError(

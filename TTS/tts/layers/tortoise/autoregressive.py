@@ -16,6 +16,19 @@ def null_position_embeddings(range, dim):
     return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
 
 
+class NullPositionEmbeddings(nn.Module):
+    """Zero position embeddings in the model's dtype, replacing GPT-2's learned ones."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.register_buffer("dtype_probe", torch.empty(0), persistent=False)  # follows .to(dtype)
+
+    def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
+        shape = (*position_ids.shape, self.dim)
+        return torch.zeros(shape, dtype=self.dtype_probe.dtype, device=position_ids.device)
+
+
 def _p(t):
     return t and (len(t), len(t[0]), t[0][0].shape)  # kv_cache debug
 
@@ -224,7 +237,7 @@ def build_hf_gpt_transformer(
     gpt = GPT2Model(gpt_config)
     # Override the built in positional embeddings
     del gpt.wpe  # TODO: figure out relevance in fixing exported model definition: Embedding(1012, 1024)
-    gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
+    gpt.wpe = NullPositionEmbeddings(model_dim)
     # Built-in token embeddings are unused.
     del gpt.wte
 

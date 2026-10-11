@@ -196,6 +196,7 @@ class GPT(nn.Module):
     ):
         if prompt is not None:
             offset = prompt.shape[1]
+            prompt = prompt.to(first_inputs.dtype)
             if second_inputs is not None:
                 emb = torch.cat([prompt, first_inputs, second_inputs], dim=1)
             else:
