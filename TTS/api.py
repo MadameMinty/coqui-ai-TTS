@@ -324,6 +324,38 @@ class TTS(nn.Module):
         )
         return wav
 
+    def tts_batch(
+        self,
+        texts: list[str],
+        speaker: str | None = None,
+        language: str | None = None,
+        speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]] | None = None,
+        split_sentences: bool = True,
+        batch_size: int = 8,
+        **kwargs,
+    ) -> list[list[float]]:
+        """Convert several texts to speech with one voice, decoding their sentences together.
+
+        Models that support it (XTTS) decode up to `batch_size` sentences at once, which is much faster on a GPU;
+        others synthesize them one by one. Arguments as in `tts()`.
+
+        Returns:
+            One waveform per text.
+        """
+        if self.synthesizer is None:
+            msg = "The selected model does not support speech synthesis."
+            raise RuntimeError(msg)
+        self._check_arguments(speaker=speaker, language=language, speaker_wav=speaker_wav, **kwargs)
+        return self.synthesizer.tts_batch(
+            texts,
+            speaker_name=speaker,
+            language_name=language,
+            speaker_wav=speaker_wav,
+            split_sentences=split_sentences,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
     def tts_to_file(
         self,
         text: str,
