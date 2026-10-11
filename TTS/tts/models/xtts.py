@@ -17,7 +17,6 @@ from TTS.tts.configs.shared_configs import BaseTTSConfig
 from TTS.tts.configs.xtts_config import XttsArgs, XttsAudioConfig, XttsConfig
 from TTS.tts.layers.xtts.gpt import GPT
 from TTS.tts.layers.xtts.hifigan_decoder import HifiDecoder
-from TTS.tts.layers.xtts.stream_generator import init_stream_support
 from TTS.tts.layers.xtts.tokenizer import VoiceBpeTokenizer, split_sentence
 from TTS.tts.layers.xtts.xtts_manager import SpeakerManager
 from TTS.tts.models.base_tts import BaseTTS
@@ -28,8 +27,6 @@ from TTS.utils.generic_utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-init_stream_support()
 
 
 def wav_to_mel_cloning(
@@ -574,23 +571,14 @@ class Xtts(BaseTTS):
                 " ❗ XTTS can only generate text with a maximum of 400 tokens."
             )
 
-            fake_inputs = self.gpt.compute_embeddings(
-                gpt_cond_latent.to(self.device),
-                text_tokens,
-            )
             gpt_generator = self.gpt.get_generator(
-                fake_inputs=fake_inputs,
+                gpt_cond_latent,
+                text_tokens,
                 top_k=top_k,
                 top_p=top_p,
                 temperature=temperature,
                 do_sample=do_sample,
-                num_beams=1,
-                num_return_sequences=1,
-                length_penalty=float(length_penalty),
                 repetition_penalty=float(repetition_penalty),
-                output_attentions=False,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
                 **hf_generate_kwargs,
             )
 

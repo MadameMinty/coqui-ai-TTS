@@ -37,8 +37,7 @@ def test_final_chunk_crossfades_with_previous_overlap():
 @pytest.mark.parametrize("token_count", [1, 2, 19, 20, 21, 22, 23, 40, 45])
 def test_inference_stream_flushes_final_audio(token_count):
     gpt = SimpleNamespace(
-        compute_embeddings=lambda *args: torch.zeros(1, 1),
-        get_generator=lambda **kwargs: iter((torch.tensor([i]), torch.zeros(1, 4)) for i in range(token_count)),
+        get_generator=lambda *args, **kwargs: iter((torch.tensor([i]), torch.zeros(1, 4)) for i in range(token_count)),
     )
     model = SimpleNamespace(
         device=torch.device("cpu"),
